@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAM Monitor</title>
+<link rel="stylesheet" href="vendor/uPlot.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="page">
+
+<header class="topbar">
+  <div class="topbar-left">
+    <div class="brand">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"/><path d="M9 14l2-3 2 2 2-3"/></svg>
+      <span>RAM Monitor</span>
+    </div>
+    <label class="device-picker">
+      <span class="sr-only">Device</span>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M11 18h2"/></svg>
+      <select id="device"><option value="">Searching for devices…</option></select>
+    </label>
+    <div class="status" id="status">
+      <span class="dot" id="status-dot"></span>
+      <span id="status-text">Not connected</span>
+      <span class="mono" id="elapsed">00:00:00</span>
+      <span class="muted" id="status-meta"></span>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <button type="button" class="btn" id="pause-btn" disabled>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path id="pause-icon" d="M9 5v14M15 5v14"/></svg>
+      <span id="pause-label">Pause</span>
+    </button>
+    <button type="button" class="btn" id="restart-btn" title="Clear the displayed data and start a new session (previous CSV files are kept)" disabled>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>
+      Restart
+    </button>
+    <a class="btn btn-primary" id="export-btn" href="api/export.csv" aria-disabled="true">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>
+      Export CSV
+    </a>
+  </div>
+</header>
+
+<div class="empty card" id="empty" hidden>
+  <h2>No device selected</h2>
+  <p>Connect an Android device with USB debugging enabled and select it in the list above.</p>
+</div>
+
+<main id="main">
+<section class="row">
+  <div class="card chart-card">
+    <div class="card-head">
+      <h2>RAM usage over time</h2>
+      <span class="muted">Whole session</span>
+    </div>
+    <div class="legend" id="legend"></div>
+    <div class="chart-wrap" id="chart-wrap">
+      <div id="chart"></div>
+      <div class="tooltip" id="tooltip" hidden></div>
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="card hero">
+      <span class="eyebrow">RAM in use</span>
+      <div class="hero-num">
+        <div class="hero-main"><span class="mono big" id="used">–</span><span class="mono unit">GB</span></div>
+        <div class="hero-sub"><span class="mono muted" id="total">/ – GB</span><span class="pill mono" id="pct">–</span></div>
+      </div>
+      <div class="bar" aria-hidden="true">
+        <div class="bar-fill" id="bar-fill"></div>
+        <div class="bar-tick" id="bar-tick"></div>
+      </div>
+      <div class="hero-foot">
+        <span id="formula">Used = MemTotal − MemAvailable</span>
+        <span>Threshold <b class="amber" id="th-label">80%</b></span>
+      </div>
+      <div class="seg" role="group" aria-label="How Used is calculated">
+        <button type="button" aria-pressed="true" data-mode="kernel">Kernel</button>
+        <button type="button" aria-pressed="false" data-mode="android">Android (dumpsys)</button>
+      </div>
+    </div>
+    <div class="card zram">
+      <div>
+        <span class="muted">zram</span>
+        <span class="small muted">stores <span class="mono" id="zram-stored">–</span> · ratio <span class="mono" id="zram-ratio">–</span></span>
+      </div>
+      <span class="mono zram-num" id="zram">–</span>
+    </div>
+  </div>
+</section>
+
+<section class="row">
+<div class="card procs-card">
+  <div class="card-head">
+    <h2>Processes by PSS</h2>
+    <div class="proc-tools">
+      <label for="proc-filter" class="sr-only">Filter processes</label>
+      <label for="proc-group" class="sr-only">Filter by group</label>
+      <select id="proc-group"><option value="">All groups</option></select>
+      <input id="proc-filter" type="search" placeholder="Filter by process name" autocomplete="off">
+      <span class="muted small" id="proc-meta">waiting for dumpsys meminfo…</span>
+    </div>
+  </div>
+  <div class="table-scroll">
+    <table class="procs">
+      <thead>
+        <tr>
+          <th scope="col">Process</th>
+          <th scope="col">Group</th>
+          <th scope="col" class="num sorted">PSS ▼</th>
+          <th scope="col" class="num">Swap</th>
+          <th scope="col" class="num">Δ session</th>
+        </tr>
+      </thead>
+      <tbody id="proc-total" class="total"></tbody>
+      <tbody id="proc-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card comp-card">
+  <div class="card-head">
+    <h2>Components</h2>
+    <button type="button" class="btn btn-small" id="comp-add" title="Save the current group/name filter of the table as a component">+ Add current filter</button>
+  </div>
+  <p class="muted small comp-hint" id="comp-hint">Filter the process table by group and/or name, then add the filter as a component.
+    Each component is a bar with the total PSS of its matching processes, so components can be compared.</p>
+  <div class="comp-list" id="comp-list"></div>
+  <span class="muted small" id="comp-meta"></span>
+</div>
+</section>
+
+<p class="foot muted small" id="csv-path"></p>
+</main>
+</div>
+<script src="vendor/uPlot.iife.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
