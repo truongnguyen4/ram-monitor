@@ -1,4 +1,4 @@
-// Command ram-monitor shows the RAM usage of an Android device in real time.
+// Command ram-monitor shows the RAM usage of one or more Android devices in real time.
 //
 // It reads /proc/meminfo over a persistent `adb shell` session, polls
 // `dumpsys meminfo` for per-process PSS, records everything to CSV and serves
@@ -6,8 +6,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,7 +20,9 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -31,15 +35,16 @@ var webFS embed.FS
 
 func main() {
 	var (
-		port         = flag.Int("port", 8080, "dashboard HTTP port (if not set and 8080 is busy, the next free port up to 8099 is used)")
+		port         = flag.Int("port", 8080, "dashboard HTTP port on 127.0.0.1; one instance serves every device")
 		adbPath      = flag.String("adb", "", "adb path (default: search PATH / Android SDK)")
-		serial       = flag.String("serial", "", "device serial (default: auto-select if only one device is connected)")
+		serial       = flag.String("serial", "", "device serials to monitor, comma-separated or \"all\" (default: the only connected device; add more in the dashboard)")
 		interval     = flag.Duration("interval", time.Second, "/proc/meminfo polling interval")
 		procInterval = flag.Duration("proc-interval", 10*time.Second, "dumpsys meminfo polling interval (process table)")
 		topN         = flag.Int("top", 0, "limit the process table to the N largest rows after filtering (0 = show all processes)")
 		threshold    = flag.Float64("threshold", 80, "warning threshold, % of MemTotal")
 		outDir       = flag.String("out", "ram-monitor-data", "output directory for CSV files")
 		noBrowser    = flag.Bool("no-browser", false, "do not open the browser automatically")
+		stateFile    = flag.String("state", "", "file that remembers the monitored devices across restarts (default: <out>/monitored.json; \"none\" to disable)")
 	)
 	flag.Parse()
 	log.SetFlags(log.Ltime)
@@ -65,20 +70,31 @@ func main() {
 		ProcInterval: *procInterval,
 		TopN:         *topN,
 		Threshold:    *threshold,
+		StateFile:    statePath(*stateFile, *outDir),
 	}, sub)
 
 	// Listen before recording, so a busy port does not leave an empty session behind.
-	portSet := false
-	flag.Visit(func(f *flag.Flag) { portSet = portSet || f.Name == "port" })
-	ln, err := listen(*port, portSet)
+	// Only one port is ever opened: if a ram-monitor already serves it, hand the devices to it and exit.
+	url := fmt.Sprintf("http://localhost:%d", *port)
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", *port))
 	if err != nil {
-		log.Fatal(err)
+		if !isRAMMonitor(*port) {
+			log.Fatalf("cannot listen on 127.0.0.1:%d: %v (another program uses it; pick another -port)", *port, err)
+		}
+		log.Printf("ram-monitor is already running at %s; adding the devices there", url)
+		handOff(*port, *serial)
+		if !*noBrowser {
+			openBrowser(url)
+		}
+		return
 	}
-	url := fmt.Sprintf("http://localhost:%d", ln.Addr().(*net.TCPAddr).Port)
 
 	if err := srv.AutoSelect(context.Background(), *serial); err != nil {
-		log.Printf("Not recording yet: %v", err)
+		log.Printf("Not recording: %v", err)
 	}
+	watchCtx, stopWatch := context.WithCancel(context.Background())
+	defer stopWatch()
+	go srv.Watch(watchCtx, 15*time.Second)
 	httpSrv := &http.Server{Handler: srv.Handler()}
 	go func() {
 		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -100,27 +116,48 @@ func main() {
 	_ = httpSrv.Shutdown(ctx)
 }
 
-// listen opens the dashboard port on 127.0.0.1. When the port was not given explicitly and is busy
-// (e.g. another ram-monitor already monitors another device), the next free port is used.
-func listen(port int, explicit bool) (net.Listener, error) {
-	last := port
-	if !explicit {
-		last = port + 19
+func statePath(flagValue, outDir string) string {
+	switch flagValue {
+	case "none":
+		return ""
+	case "":
+		return filepath.Join(outDir, "monitored.json")
 	}
-	var err error
-	for p := port; p <= last; p++ {
-		var ln net.Listener
-		if ln, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p)); err == nil {
-			if p != port {
-				log.Printf("Port %d is busy, using %d", port, p)
-			}
-			return ln, nil
+	return flagValue
+}
+
+// isRAMMonitor reports whether a ram-monitor dashboard answers on 127.0.0.1:port.
+func isRAMMonitor(port int) bool {
+	c := http.Client{Timeout: 2 * time.Second}
+	r, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/api/config", port))
+	if err != nil {
+		return false
+	}
+	defer r.Body.Close()
+	var cfg map[string]any
+	if json.NewDecoder(r.Body).Decode(&cfg) != nil {
+		return false
+	}
+	_, ok := cfg["procIntervalMs"]
+	return ok
+}
+
+// handOff asks the running instance to monitor the serials (comma-separated) too.
+func handOff(port int, serials string) {
+	c := http.Client{Timeout: 15 * time.Second}
+	for _, serial := range strings.Split(serials, ",") {
+		if serial = strings.TrimSpace(serial); serial == "" {
+			continue
 		}
+		body, _ := json.Marshal(map[string]string{"serial": serial})
+		r, err := c.Post(fmt.Sprintf("http://127.0.0.1:%d/api/device", port), "application/json", bytes.NewReader(body))
+		if err != nil {
+			log.Printf("%s: %v", serial, err)
+			continue
+		}
+		r.Body.Close()
+		log.Printf("%s: %s", serial, r.Status)
 	}
-	if explicit {
-		return nil, fmt.Errorf("cannot listen on port %d: %v (try another -port)", port, err)
-	}
-	return nil, fmt.Errorf("no free port in %d-%d: %v (use -port)", port, last, err)
 }
 
 func openBrowser(url string) {

@@ -16,11 +16,17 @@
       <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 1v4M15 1v4M9 19v4M15 19v4M1 9h4M1 15h4M19 9h4M19 15h4"/><path d="M9 14l2-3 2 2 2-3"/></svg>
       <span>RAM Monitor</span>
     </div>
-    <label class="device-picker">
-      <span class="sr-only">Device</span>
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M11 18h2"/></svg>
-      <select id="device"><option value="">Searching for devices…</option></select>
-    </label>
+    <details class="device-picker" id="picker">
+      <summary title="Choose which devices to monitor">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M11 18h2"/></svg>
+        <span id="picker-label">Devices</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+      </summary>
+      <div class="picker-panel">
+        <span class="muted small">Click a device to start watching it, click again to stop (its CSV files are kept).</span>
+        <div class="picker-list" id="picker-list"><span class="muted small">Searching for devices…</span></div>
+      </div>
+    </details>
     <div class="status" id="status">
       <span class="dot" id="status-dot"></span>
       <span id="status-text">Not connected</span>
@@ -44,9 +50,11 @@
   </div>
 </header>
 
+<nav class="devices" id="devices" aria-label="Monitored devices"></nav>
+
 <div class="empty card" id="empty" hidden>
-  <h2>No device selected</h2>
-  <p>Connect an Android device with USB debugging enabled and select it in the list above.</p>
+  <h2>No device monitored</h2>
+  <p>Connect an Android device with USB debugging enabled and tick it in <b>Devices</b> above.</p>
 </div>
 
 <main id="main">

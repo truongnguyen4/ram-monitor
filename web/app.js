@@ -21,7 +21,7 @@ const GROUP_ORDER = ['Native', 'System', 'Persistent', 'Persistent Service', 'Fo
   'Perceptible', 'Perceptible Medium', 'Perceptible Low', 'Backup', 'Heavy Weight',
   'A Services', 'Home', 'Previous', 'B Services', 'Cached'];
 
-let cfg = { intervalMs: 1000, procIntervalMs: 10000, threshold: 80, topN: 0 };
+let cfg = { intervalMs: 1000, procIntervalMs: 10000, threshold: 80, topN: 0, maxSamples: 7200, maxPoints: 1440 };
 let info = null;
 let samples = [];
 let procs = null;
@@ -32,6 +32,10 @@ let filter = '';
 let groupFilter = '';
 let plot = null;
 let cols = null; // uPlot data columns
+let selected = decodeURIComponent(location.hash.slice(1)); // serial shown in detail (kept in the URL hash)
+const overview = new Map(); // serial → { info, status, paused, last, androidUsed, recent: [used kB] }
+const RECENT = 300;
+const q = () => `serial=${encodeURIComponent(selected)}`;
 
 // ---------- chart ----------
 
@@ -244,7 +248,12 @@ function renderElapsed() {
 }
 
 function renderAll() {
+  const waiting = !info && overview.has(selected);
   $('empty').hidden = !!info;
+  $('empty').querySelector('h2').textContent = waiting ? `Waiting for ${selected}` : 'No device monitored';
+  $('empty').querySelector('p').innerHTML = waiting
+    ? 'This device is remembered but not connected. Monitoring resumes by itself when adb sees it again (checked every 15 s).'
+    : 'Connect an Android device with USB debugging enabled and tick it in <b>Devices</b> above.';
   // several instances can run side by side: name the tab after the device
   document.title = info ? `RAM · ${info.model || 'Device'} · ${info.serial}` : 'RAM Monitor';
   $('main').hidden = !info;
@@ -268,6 +277,23 @@ const COMP_STORE = 'ram-monitor.components';
 
 let comps = loadComps();     // [{ id, group, name, color }], name is lower-case
 let hist = emptyHist();      // { keys: [[name, group]], idx: Map, points: [{ t, k, p }] }
+
+// Mirrors session.ThinSamples / ThinPoints on the server: the older half is thinned 2:1,
+// the first entry is kept, and for samples each pair keeps the higher Used (peaks survive).
+function thinSamples(xs) {
+  const half = Math.floor(xs.length / 2);
+  const out = [xs[0]];
+  let i = 1;
+  for (; i + 1 < half; i += 2) out.push(xs[i + 1].used >= xs[i].used ? xs[i + 1] : xs[i]);
+  return out.concat(xs.slice(i));
+}
+function thinPoints(ps) {
+  const half = Math.floor(ps.length / 2);
+  const out = [ps[0]];
+  let i = 1;
+  for (; i + 1 < half; i += 2) out.push(ps[i + 1]);
+  return out.concat(ps.slice(i));
+}
 
 function emptyHist() { return { keys: [], idx: new Map(), points: [] }; }
 
@@ -316,6 +342,7 @@ function appendHistory(snap) {
     pt.p.push(r.pss);
   }
   hist.points.push(pt);
+  if (hist.points.length > cfg.maxPoints) hist.points = thinPoints(hist.points);
   return pt;
 }
 
@@ -397,33 +424,160 @@ function onCompPoint(pt) {
 }
 
 // ---------- devices ----------
+// Every monitored device has a tile in the strip; the selected one is shown in detail below.
+
+// Tiles are updated in place (not rebuilt) so a click is not lost when a sample arrives mid-click.
+function newTile(serial) {
+  const el = document.createElement('div');
+  el.className = 'dev';
+  el.dataset.serial = serial;
+  el.tabIndex = 0;
+  el.setAttribute('role', 'button');
+  el.innerHTML = `<div class="dev-head"><span class="dot"></span><b></b><span class="dev-key"></span></div>
+    <div class="dev-sub"></div>
+    <div class="dev-num"><span class="v"></span><span class="p"></span></div>
+    <svg viewBox="0 0 100 30" preserveAspectRatio="none" aria-hidden="true"></svg>
+    <button type="button" class="dev-x" title="Stop monitoring (CSV files are kept)">×</button>`;
+  el.querySelector('.dev-x').dataset.stop = serial;
+  el.querySelector('.dev-x').setAttribute('aria-label', `Stop monitoring ${serial}`);
+  return el;
+}
+
+function updateTile(el, serial, ov, i) {
+  const last = ov.last;
+  const total = last ? last.memTotal : 0;
+  const pct = total ? (last.used / total) * 100 : null;
+  const warn = pct != null && pct >= cfg.threshold;
+  const conn = ov.status && ov.status.connected;
+  const state = ov.paused ? 'Paused' : conn ? 'Recording' : (ov.status && ov.status.message) || 'Not connected';
+  const inf = ov.info || {};
+  el.classList.toggle('sel', serial === selected);
+  el.classList.toggle('warn', warn);
+  el.classList.toggle('offline', !!ov.offline);
+  el.setAttribute('aria-pressed', String(serial === selected));
+  el.title = `${state} · click to view in detail${i < 9 ? ` (key ${i + 1})` : ''}`;
+  el.querySelector('.dot').className = `dot ${ov.paused ? 'paused' : conn ? 'ok' : 'err'}`;
+  el.querySelector('b').textContent = inf.model || 'Device';
+  const key = el.querySelector('.dev-key');
+  key.textContent = i < 9 ? String(i + 1) : '';
+  key.hidden = i >= 9;
+  el.querySelector('.dev-sub').textContent =
+    [inf.serial, inf.android && `Android ${inf.android}`, inf.physicalGB && `${inf.physicalGB} GB`].filter(Boolean).join(' · ');
+  el.querySelector('.v').textContent = last ? `${gb(last.used)} GB` : '–';
+  const p = el.querySelector('.p');
+  p.textContent = pct == null ? state : `${pct.toFixed(1)}% of ${gb(total)}`;
+  p.classList.toggle('warn', warn);
+  let svg = '';
+  if (total && ov.recent.length > 1) {
+    const n = ov.recent.length;
+    const pts = ov.recent.map((u, j) => `${((j / (n - 1)) * 100).toFixed(2)},${(30 - (u / total) * 30).toFixed(2)}`).join(' ');
+    const th = (30 - (cfg.threshold / 100) * 30).toFixed(2);
+    svg = `<line x1="0" x2="100" y1="${th}" y2="${th}"/><polyline points="${pts}"/>`;
+  }
+  el.querySelector('svg').innerHTML = svg;
+}
+
+function renderDevices() {
+  const el = $('devices');
+  const tiles = new Map([...el.children].map((t) => [t.dataset.serial, t]));
+  let i = 0;
+  for (const [serial, ov] of overview) {
+    let t = tiles.get(serial);
+    if (!t) t = newTile(serial);
+    tiles.delete(serial);
+    if (el.children[i] !== t) el.insertBefore(t, el.children[i] || null);
+    updateTile(t, serial, ov, i);
+    i++;
+  }
+  for (const t of tiles.values()) t.remove();
+}
+
+let devRenderQueued = false;
+function queueRenderDevices() {
+  if (devRenderQueued) return;
+  devRenderQueued = true;
+  requestAnimationFrame(() => { devRenderQueued = false; renderDevices(); });
+}
+
+// Loads the overview of every monitored device and makes sure a valid device is selected.
+async function loadSessions() {
+  let res = {};
+  try { res = await (await fetch('api/sessions')).json(); } catch (_) { /* keep the empty list */ }
+  overview.clear();
+  for (const x of res.sessions || []) {
+    overview.set(x.info.serial, { info: x.info, status: x.status, paused: x.paused, last: x.last, androidUsed: x.androidUsed, recent: x.recent || [] });
+  }
+  // remembered devices that are not connected: shown greyed until they come back (re-attached automatically)
+  for (const serial of res.wanted || []) {
+    if (!overview.has(serial)) {
+      overview.set(serial, { info: { serial, model: (lastDevs.find((d) => d.serial === serial) || {}).model }, offline: true,
+        status: { connected: false, message: 'waiting for the device' }, recent: [] });
+    }
+  }
+  $('picker-label').textContent = overview.size ? `Devices · ${overview.size}` : 'Devices';
+  if ($('picker').open) renderPicker();
+  if (!overview.has(selected)) selected = overview.size ? overview.keys().next().value : '';
+  renderDevices();
+}
+
+async function select(serial) {
+  if (!serial || serial === selected) return;
+  selected = serial;
+  history.replaceState(null, '', `#${encodeURIComponent(serial)}`);
+  renderDevices();
+  await loadState();
+}
+
+let lastDevs = []; // last `adb devices` answer
+const pending = new Set(); // serials with a start/stop request in flight
+
+function renderPicker() {
+  const rows = lastDevs.map((d) => ({ serial: d.serial, model: d.model, state: d.state }));
+  for (const serial of overview.keys()) if (!rows.some((r) => r.serial === serial)) rows.push({ serial, model: (overview.get(serial).info || {}).model, state: 'not connected' });
+  const ready = rows.filter((r) => r.state === 'device');
+  const allOn = ready.length > 0 && ready.every((r) => overview.has(r.serial));
+  const allRow = `<label class="all-row"><input type="checkbox" data-all="1" ${allOn ? 'checked' : ''} ${ready.length && !pending.has('all') ? '' : 'disabled'}>
+      <span><b>All devices</b></span><span class="ser">${overview.size} / ${ready.length} watched</span></label>`;
+  $('picker-list').innerHTML = rows.length ? allRow + rows.map((r) => {
+    const on = overview.has(r.serial);
+    const usable = r.state === 'device' || on; // an unauthorized/offline unit cannot be started, but can be removed
+    return `<label class="${usable ? '' : 'off'}"><input type="checkbox" data-serial="${esc(r.serial)}" ${on ? 'checked' : ''} ${usable && !pending.has(r.serial) ? '' : 'disabled'}>
+      <span>${esc(r.model || 'Device')}${r.state !== 'device' ? ` <span class="muted small">(${esc(r.state)})</span>` : ''}</span><span class="ser">${esc(r.serial)}</span></label>`;
+  }).join('') : '<span class="muted small">No device found</span>';
+}
 
 async function loadDevices() {
-  const sel = $('device');
   try {
     const devs = await (await fetch('api/devices')).json();
     if (!Array.isArray(devs)) throw new Error(devs.error || 'adb error');
-    const opts = ['<option value="">Select a device…</option>'];
-    for (const d of devs) {
-      const ram = info && info.serial === d.serial && info.physicalGB ? ` · RAM ~${info.physicalGB} GB` : '';
-      const android = info && info.serial === d.serial && info.android ? ` · Android ${info.android}` : '';
-      const label = `${d.model || 'Device'} · ${d.serial}${android}${ram}${d.state !== 'device' ? ` (${d.state})` : ''}`;
-      opts.push(`<option value="${esc(d.serial)}" ${d.state !== 'device' ? 'disabled' : ''}>${esc(label)}</option>`);
-    }
-    if (info && !devs.some((d) => d.serial === info.serial)) {
-      opts.push(`<option value="${esc(info.serial)}">${esc(info.model || info.serial)} · ${esc(info.serial)} (disconnected)</option>`);
-    }
-    sel.innerHTML = opts.join('');
-    sel.value = info ? info.serial : '';
+    lastDevs = devs;
+    renderPicker();
   } catch (e) {
-    sel.innerHTML = `<option value="">adb error: ${esc(e.message)}</option>`;
+    $('picker-list').innerHTML = `<span class="muted small">adb error: ${esc(e.message)}</span>`;
+  }
+}
+
+async function setMonitored(serial, on) {
+  pending.add(serial);
+  try {
+    const r = on
+      ? await fetch('api/device', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ serial }) })
+      : await fetch(`api/device?serial=${encodeURIComponent(serial)}`, { method: 'DELETE' });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert(`Cannot ${on ? 'monitor' : 'stop'} ${serial}: ${err.error || r.status}`);
+    }
+  } finally {
+    pending.delete(serial);
   }
 }
 
 // ---------- state & events ----------
 
 async function loadState() {
-  const st = await (await fetch('api/state')).json();
+  const want = selected;
+  const st = want ? await (await fetch(`api/state?${q()}`)).json() : { info: null };
+  if (want !== selected) return; // the user picked another device meanwhile
   info = st.info || null;
   samples = st.samples || [];
   procs = st.procs || null;
@@ -433,6 +587,7 @@ async function loadState() {
   cols = emptyCols();
   if (info) samples.forEach(pushCols);
   renderAll();
+  $('export-btn').href = `api/export.csv?${q()}`;
   if (info) {
     buildPlot();
   } else if (plot) {
@@ -445,46 +600,127 @@ async function loadState() {
 
 function connectEvents() {
   const es = new EventSource('api/events');
-  es.addEventListener('sample', (e) => {
-    if (!info) return;
-    const s = JSON.parse(e.data);
+  // Every event is {serial, v}. The overview strip follows all devices; the detail view only the selected one.
+  const on = (name, fn) => es.addEventListener(name, (e) => {
+    const { serial, v } = JSON.parse(e.data);
+    fn(serial, v, overview.get(serial));
+  });
+  on('sample', (serial, s, ov) => {
+    if (ov) {
+      ov.last = s;
+      ov.recent.push(s.used);
+      if (ov.recent.length > RECENT) ov.recent.splice(0, ov.recent.length - RECENT);
+      if (!ov.status || !ov.status.connected) ov.status = { connected: true, message: 'Recording' };
+      queueRenderDevices();
+    }
+    if (serial !== selected || !info) return;
     samples.push(s);
-    pushCols(s);
+    if (samples.length > cfg.maxSamples) { // same thinning as the server, so a long session stays light
+      samples = thinSamples(samples);
+      cols = emptyCols();
+      samples.forEach(pushCols);
+    } else {
+      pushCols(s);
+    }
     if (plot) plot.setData(cols);
     renderHero();
     renderZram();
     if (!status.connected) { status = { connected: true, message: 'Recording' }; renderStatus(); }
   });
-  es.addEventListener('procs', (e) => {
-    procs = JSON.parse(e.data);
+  on('procs', (serial, p, ov) => {
+    if (ov) ov.androidUsed = p.androidUsed;
+    if (serial !== selected) return;
+    procs = p;
     renderProcs();
     renderHero();
     if (info) onCompPoint(appendHistory(procs));
   });
-  es.addEventListener('status', (e) => { status = JSON.parse(e.data); renderStatus(); });
-  es.addEventListener('paused', (e) => { paused = JSON.parse(e.data); renderStatus(); });
-  es.addEventListener('session', () => loadState());
-  es.onopen = () => loadState(); // resync after reconnect
+  on('status', (serial, st, ov) => {
+    if (ov) { ov.status = st; queueRenderDevices(); }
+    if (serial === selected) { status = st; renderStatus(); }
+  });
+  on('paused', (serial, p, ov) => {
+    if (ov) { ov.paused = p; queueRenderDevices(); }
+    if (serial === selected) { paused = p; renderStatus(); }
+  });
+  // a device was added or restarted
+  on('session', async (serial) => {
+    const wasEmpty = !selected;
+    await loadSessions();
+    if (serial === selected || wasEmpty) await loadState();
+  });
+  on('stopped', async (serial) => {
+    const wasSelected = serial === selected;
+    await loadSessions();
+    if (wasSelected) await loadState();
+    else renderAll();
+  });
+  es.onopen = async () => { await loadSessions(); await loadState(); }; // resync after reconnect
 }
 
 // ---------- wiring ----------
 
-$('device').addEventListener('focus', loadDevices);
-$('device').addEventListener('change', async (e) => {
-  const serial = e.target.value;
-  if (!serial || (info && serial === info.serial)) return;
-  const r = await fetch('api/device', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ serial }) });
-  if (!r.ok) {
-    const err = await r.json().catch(() => ({}));
-    status = { connected: false, message: `Cannot connect: ${err.error || r.status}` };
-    renderStatus();
+$('picker').addEventListener('toggle', () => { if ($('picker').open) { renderPicker(); loadDevices(); } });
+document.addEventListener('pointerdown', (e) => { if ($('picker').open && !$('picker').contains(e.target)) $('picker').open = false; });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') $('picker').open = false; });
+$('picker-list').addEventListener('change', async (e) => {
+  if (e.target.dataset.all) { // All devices: watch every ready device, or stop them all
+    const on = e.target.checked;
+    e.target.disabled = true;
+    if (on) {
+      await setMonitored('all', true);
+    } else if (confirm(`Stop watching all ${overview.size} devices?\nTheir CSV files are kept.`)) {
+      await Promise.all([...overview.keys()].map((serial) => setMonitored(serial, false)));
+    }
+    await loadSessions();
+    await loadState();
+    renderPicker();
+    return;
   }
-  await loadState();
+  const cb = e.target.closest('input[data-serial]');
+  if (!cb) return;
+  const serial = cb.dataset.serial;
+  cb.disabled = true;
+  await setMonitored(serial, cb.checked);
+  await loadSessions();
+  if (cb.checked && !info) await loadState();
+  else if (!cb.checked && serial === selected) await loadState();
+  renderPicker();
 });
 
+
+$('devices').addEventListener('click', async (e) => {
+  const stop = e.target.closest('[data-stop]');
+  if (stop) {
+    e.stopPropagation();
+    const serial = stop.dataset.stop;
+    if (!confirm(`Stop monitoring ${serial}?\nThe CSV files of its session are kept.`)) return;
+    await fetch(`api/device?serial=${encodeURIComponent(serial)}`, { method: 'DELETE' });
+    return; // the "stopped" event refreshes the view
+  }
+  const tile = e.target.closest('.dev');
+  if (tile) select(tile.dataset.serial);
+});
+$('devices').addEventListener('keydown', (e) => {
+  const tile = e.target.closest('.dev');
+  if (tile && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); select(tile.dataset.serial); }
+});
+// keys 1–9 select a device tile (ignored while typing)
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey || /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
+  const n = Number(e.key);
+  if (n >= 1 && n <= 9) { const serial = [...overview.keys()][n - 1]; if (serial) select(serial); }
+});
+window.addEventListener('hashchange', () => select(decodeURIComponent(location.hash.slice(1))));
+
 $('pause-btn').addEventListener('click', async () => {
-  const r = await fetch('api/pause', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused: !paused }) });
-  if (r.ok) { paused = (await r.json()).paused; renderStatus(); }
+  const r = await fetch(`api/pause?${q()}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ paused: !paused }) });
+  if (r.ok) {
+    paused = (await r.json()).paused;
+    const ov = overview.get(selected);
+    if (ov) { ov.paused = paused; renderDevices(); }
+    renderStatus();
+  }
 });
 
 $('restart-btn').addEventListener('click', async () => {
@@ -493,7 +729,7 @@ $('restart-btn').addEventListener('click', async () => {
   const btn = $('restart-btn');
   btn.disabled = true;
   try {
-    const r = await fetch('api/restart', { method: 'POST' });
+    const r = await fetch(`api/restart?${q()}`, { method: 'POST' });
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
       status = { connected: false, message: `Cannot restart: ${err.error || r.status}` };

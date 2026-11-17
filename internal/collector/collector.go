@@ -134,6 +134,7 @@ func (c *Collector) pollProcs(ctx context.Context) (ProcSnapshot, error) {
 	if err != nil {
 		return ProcSnapshot{}, err
 	}
+	t := time.Now().UnixMilli() // when dumpsys answered, not after the VmSwap read
 	procs, used := parseDumpsysMeminfo(string(out))
 	if len(procs) == 0 {
 		return ProcSnapshot{}, fmt.Errorf("cannot read the process list from dumpsys meminfo")
@@ -152,5 +153,5 @@ func (c *Collector) pollProcs(ctx context.Context) (ProcSnapshot, error) {
 			procs[i].Swap = swap[procs[i].PID]
 		}
 	}
-	return ProcSnapshot{T: time.Now().UnixMilli(), AndroidUsed: used, Procs: procs}, nil
+	return ProcSnapshot{T: t, AndroidUsed: used, Procs: procs}, nil
 }

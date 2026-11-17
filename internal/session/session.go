@@ -3,6 +3,7 @@ package session
 
 import (
 	"bufio"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -54,24 +55,63 @@ type ProcPoint struct {
 	P []int64 `json:"p"`
 }
 
+// Memory caps per session. Beyond them the older half is thinned 2:1, so a session of any length
+// stays small in RAM and fast to send to the UI. The CSV files always keep every sample.
+const (
+	MaxSamples = 7200 // /proc/meminfo samples (2 h at 1 s, then coarser)
+	MaxPoints  = 1440 // dumpsys polls (4 h at 10 s, then coarser)
+)
+
+// csvFile is a gzip-compressed CSV file. Each Flush ends a gzip block, so the file can be read
+// (zcat, pandas, the Export button) while it is still being written.
+type csvFile struct {
+	f  *os.File
+	gz *gzip.Writer
+	w  *bufio.Writer
+}
+
+func newCSV(f *os.File, header string) *csvFile {
+	gz, _ := gzip.NewWriterLevel(f, gzip.BestCompression)
+	c := &csvFile{f: f, gz: gz, w: bufio.NewWriterSize(gz, 64*1024)}
+	fmt.Fprintln(c.w, header)
+	c.flush()
+	return c
+}
+
+func (c *csvFile) flush() {
+	_ = c.w.Flush()
+	_ = c.gz.Flush()
+}
+
+func (c *csvFile) close() {
+	_ = c.w.Flush()
+	_ = c.gz.Close()
+	_ = c.f.Close()
+}
+
 // Session stores samples in memory and appends them to CSV files.
 type Session struct {
-	mu          sync.Mutex
-	info        Info
-	samples     []collector.Sample
-	procs       *Procs
-	histKeys    [][2]string
-	histIdx     map[[2]string]int32
-	histPoints  []ProcPoint
-	firstPSS    map[string]int64
-	status      collector.Status
-	paused      bool
-	sysCSV      *os.File
-	sysW        *bufio.Writer
-	procCSV     *os.File
-	procW       *bufio.Writer
-	lastAndroid int64
+	mu           sync.Mutex
+	info         Info
+	samples      []collector.Sample
+	totalSamples int
+	procs        *Procs
+	histKeys     [][2]string
+	histIdx      map[[2]string]int32
+	histPoints   []ProcPoint
+	firstPSS     map[string]int64
+	status       collector.Status
+	paused       bool
+	sys          *csvFile
+	proc         *csvFile
+	procPath     string
+	pendingSys   int // samples written since the last flush
+	nProcs       int // dumpsys polls recorded
+	lastAndroid  int64
 }
+
+// sysFlushEvery bounds what a hard kill can lose (Close flushes everything).
+const sysFlushEvery = 10
 
 var unsafeChars = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
@@ -90,8 +130,8 @@ func New(outDir string, info Info) (*Session, error) {
 		if i > 1 {
 			name = fmt.Sprintf("%s_%d", base, i)
 		}
-		sysPath = filepath.Join(outDir, name+".csv")
-		procPath = filepath.Join(outDir, name+"_procs.csv")
+		sysPath = filepath.Join(outDir, name+".csv.gz")
+		procPath = filepath.Join(outDir, name+"_procs.csv.gz")
 		if _, err := os.Stat(procPath); err == nil {
 			continue
 		}
@@ -114,26 +154,29 @@ func New(outDir string, info Info) (*Session, error) {
 		info:     info,
 		firstPSS: map[string]int64{},
 		histIdx:  map[[2]string]int32{},
-		sysCSV:   sysF, sysW: bufio.NewWriter(sysF),
-		procCSV: procF, procW: bufio.NewWriter(procF),
-		status: collector.Status{Message: "connecting…"},
+		sys:      newCSV(sysF, "time,elapsed_s,used_kb,mem_total_kb,mem_available_kb,anon_kb,shmem_kb,kernel_kb,zram_kb,other_kb,zram_stored_kb,swap_used_kb,android_used_kb"),
+		proc:     newCSV(procF, "time,elapsed_s,process,pid,group,pss_kb,swap_kb"),
+		procPath: procPath,
+		status:   collector.Status{Message: "connecting…"},
 	}
 	s.info.CSVPath = sysPath
-	fmt.Fprintln(s.sysW, "time,elapsed_s,used_kb,mem_total_kb,mem_available_kb,anon_kb,shmem_kb,kernel_kb,zram_kb,other_kb,zram_stored_kb,swap_used_kb,android_used_kb")
-	fmt.Fprintln(s.procW, "time,elapsed_s,process,pid,group,pss_kb,swap_kb")
-	s.sysW.Flush()
-	s.procW.Flush()
 	return s, nil
 }
 
-// Close flushes and closes the CSV files.
+// Close flushes and closes the CSV files. A session that recorded nothing leaves no files behind.
 func (s *Session) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sysW.Flush()
-	s.procW.Flush()
-	s.sysCSV.Close()
-	s.procCSV.Close()
+	if s.sys == nil {
+		return
+	}
+	s.sys.close()
+	s.proc.close()
+	s.sys, s.proc = nil, nil
+	if s.totalSamples == 0 && s.nProcs == 0 {
+		_ = os.Remove(s.info.CSVPath)
+		_ = os.Remove(s.procPath)
+	}
 }
 
 // Info returns the session info.
@@ -161,18 +204,25 @@ func (s *Session) SetStatus(st collector.Status) {
 func (s *Session) AddSample(x collector.Sample) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.paused {
+	if s.paused || s.sys == nil {
 		return false
 	}
 	if s.info.PhysicalGB == 0 {
 		s.info.PhysicalGB = estimatePhysicalGB(x.MemTotal)
 	}
 	s.samples = append(s.samples, x)
+	if len(s.samples) > MaxSamples {
+		s.samples = ThinSamples(s.samples)
+	}
+	s.totalSamples++
 	t := time.UnixMilli(x.T)
-	fmt.Fprintf(s.sysW, "%s,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+	fmt.Fprintf(s.sys.w, "%s,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
 		t.Format("2006-01-02T15:04:05.000"), float64(x.T-s.info.StartedAt)/1000,
 		x.Used, x.MemTotal, x.MemAvailable, x.Anon, x.Shmem, x.Kernel, x.Zram, x.Other, x.ZramOrig, x.SwapUsed, s.lastAndroid)
-	s.sysW.Flush()
+	if s.pendingSys++; s.pendingSys >= sysFlushEvery {
+		s.sys.flush()
+		s.pendingSys = 0
+	}
 	return true
 }
 
@@ -181,9 +231,10 @@ func (s *Session) AddSample(x collector.Sample) bool {
 func (s *Session) SetProcs(snap collector.ProcSnapshot) (Procs, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.paused {
+	if s.paused || s.sys == nil {
 		return Procs{}, false
 	}
+	s.nProcs++
 	s.lastAndroid = snap.AndroidUsed
 	rows := make([]ProcRow, 0, len(snap.Procs))
 	point := ProcPoint{T: snap.T, K: make([]int32, 0, len(snap.Procs)), P: make([]int64, 0, len(snap.Procs))}
@@ -204,12 +255,15 @@ func (s *Session) SetProcs(snap collector.ProcSnapshot) (Procs, bool) {
 			s.firstPSS[p.Name] = p.PSS
 		}
 		rows = append(rows, ProcRow{Proc: p, Delta: p.PSS - first})
-		fmt.Fprintf(s.procW, "%s,%.1f,%q,%d,%q,%d,%d\n",
+		fmt.Fprintf(s.proc.w, "%s,%.1f,%q,%d,%q,%d,%d\n",
 			t.Format("2006-01-02T15:04:05.000"), float64(snap.T-s.info.StartedAt)/1000,
 			p.Name, p.PID, p.Group, p.PSS, p.Swap)
 	}
-	s.procW.Flush()
+	s.proc.flush()
 	s.histPoints = append(s.histPoints, point)
+	if len(s.histPoints) > MaxPoints {
+		s.histPoints = ThinPoints(s.histPoints)
+	}
 	pr := Procs{T: snap.T, AndroidUsed: snap.AndroidUsed, Rows: rows}
 	s.procs = &pr
 	return pr, true
@@ -239,12 +293,72 @@ func (s *Session) Snapshot() State {
 	return State{Info: s.info, Paused: s.paused, Status: s.status, Samples: samples, Procs: s.procs, History: hist}
 }
 
-// CSVPath returns the system CSV path after flushing it.
+// Summary is the overview of one monitored device: its latest values and recent Used values.
+type Summary struct {
+	Info        Info              `json:"info"`
+	Paused      bool              `json:"paused"`
+	Status      collector.Status  `json:"status"`
+	Last        *collector.Sample `json:"last"`
+	AndroidUsed int64             `json:"androidUsed"`
+	Recent      []int64           `json:"recent"` // Used (kB) of the last n samples
+}
+
+// Summary returns the overview of the session with the last n Used values.
+func (s *Session) Summary(n int) Summary {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sum := Summary{Info: s.info, Paused: s.paused, Status: s.status, AndroidUsed: s.lastAndroid, Recent: []int64{}}
+	if len(s.samples) > 0 {
+		last := s.samples[len(s.samples)-1]
+		sum.Last = &last
+	}
+	from := max(0, len(s.samples)-n)
+	for _, x := range s.samples[from:] {
+		sum.Recent = append(sum.Recent, x.Used)
+	}
+	return sum
+}
+
+// CSVPath returns the system CSV path (gzip) after flushing it.
 func (s *Session) CSVPath() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sysW.Flush()
+	if s.sys != nil {
+		s.sys.flush()
+		s.pendingSys = 0
+	}
 	return s.info.CSVPath
+}
+
+// ThinSamples halves the resolution of the older half of xs. The first sample is kept and each
+// later pair keeps the sample with the higher Used, so peaks survive thinning.
+// The web UI applies the same rule (app.js thinSamples) to stay in step with the server.
+func ThinSamples(xs []collector.Sample) []collector.Sample {
+	half := len(xs) / 2
+	out := make([]collector.Sample, 0, len(xs)-half/2)
+	out = append(out, xs[0])
+	i := 1
+	for ; i+1 < half; i += 2 {
+		if xs[i+1].Used >= xs[i].Used {
+			out = append(out, xs[i+1])
+		} else {
+			out = append(out, xs[i])
+		}
+	}
+	return append(out, xs[i:]...)
+}
+
+// ThinPoints halves the resolution of the older half of the dumpsys history (first point kept,
+// later point of each pair kept). The web UI mirrors it (app.js thinPoints).
+func ThinPoints(ps []ProcPoint) []ProcPoint {
+	half := len(ps) / 2
+	out := make([]ProcPoint, 0, len(ps)-half/2)
+	out = append(out, ps[0])
+	i := 1
+	for ; i+1 < half; i += 2 {
+		out = append(out, ps[i+1])
+	}
+	return append(out, ps[i:]...)
 }
 
 // estimatePhysicalGB rounds MemTotal (kB) up to a common DRAM size.

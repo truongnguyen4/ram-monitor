@@ -1,6 +1,6 @@
 # RAM Monitor
 
-Real-time monitor of the RAM in use on an Android device. It runs on a PC (Windows / Linux) and talks to the device through `adb`.
+Real-time monitor of the RAM in use on one or more Android devices. It runs on a PC (Windows / Linux) and talks to the device through `adb`.
 When started, it opens a dashboard in the browser at `http://localhost:8080`.
 
 ## Requirements
@@ -20,27 +20,30 @@ When started, it opens a dashboard in the browser at `http://localhost:8080`.
 ram-monitor-windows-amd64.exe
 ```
 
-If only one device is connected, the tool selects it and starts recording right away. With several devices, select one in the dashboard or use `-serial`.
+One instance monitors any number of devices on **one port** (`127.0.0.1:8080`, loopback only).
+If only one device is connected, it starts recording right away; otherwise add devices with `-serial A,B` (or `-serial all`) or tick them in the
+**Devices** checklist of the dashboard (All / None buttons; unticking stops a device and keeps its CSV files) (devices are never polled unless named: `dumpsys` disturbs measurements running on them).
 Press `Ctrl+C` in the terminal window to stop.
 
-### Comparing two devices
+### Several devices
 
-Run one instance per device. Each instance has its own dashboard, session and CSV files
-(file names contain the serial, so instances can share the same `-out` directory):
+Every monitored device has a tile at the top of the dashboard: model, serial, RAM in use, % of MemTotal and a sparkline
+of the last 300 samples, updated live. Click a tile (or press `1`–`9`) to show that device in detail below:
+chart, process table, components, Pause / Restart / Export apply to the selected device. The selected serial is kept
+in the URL (`http://localhost:8080/#<serial>`), so a second browser tab can show another device side by side.
+The tile's × stops monitoring that device (its CSV files are kept). Each device has its own session and CSV files.
 
-```sh
-./ram-monitor-linux-amd64 -serial <serial-A>     # http://localhost:8080
-./ram-monitor-linux-amd64 -serial <serial-B>     # 8080 is busy -> http://localhost:8081
-```
+The monitored set is remembered in `<out>/monitored.json` (flag `-state`): after a restart or a reboot the tool
+monitors the same devices again, and a remembered device that is unplugged or rebooting is re-attached by itself
+(adb is checked every 15 s). Its tile stays greyed until then.
 
-When `-port` is not given and 8080 is busy, the next free port up to 8099 is used and printed in the terminal.
-With an explicit `-port`, a busy port is an error. The browser tab title shows the device model and serial.
-Components are saved per dashboard address (browser storage), so add the same components in each tab to compare them.
+Running the tool again while an instance is up does not open another port: it asks the running instance to add the
+`-serial` devices and exits. If the port is held by another program, the tool stops with an error.
 
 | Flag | Default | Description |
 |---|---|---|
-| `-serial` | (auto) | Device serial |
-| `-port` | `8080` | Dashboard port (listens on 127.0.0.1 only) |
+| `-serial` | (auto) | Device serials, comma-separated (default: the only connected device) |
+| `-port` | `8080` | Dashboard port (127.0.0.1 only; never falls back to another port) |
 | `-interval` | `1s` | `/proc/meminfo` polling interval |
 | `-proc-interval` | `10s` | `dumpsys meminfo` polling interval (process table) |
 | `-top` | `0` | Limit the process table to the N largest rows after filtering (`0` = show all processes) |
@@ -118,12 +121,19 @@ so a large Cached group at idle does not mean the device is short of RAM.
 
 ## Output files
 
-Each session creates two files in the `-out` directory:
+Each session creates two gzip-compressed CSV files in the `-out` directory (read them with `zcat`, or
+`pandas.read_csv(path)` which detects gzip; about 12 MB per device per day in total, 14× smaller than plain CSV):
 
-- `ram_<serial>_<time>.csv`: one line per sample (Used, layers, zram, swap, Android Used), in kB.
-- `ram_<serial>_<time>_procs.csv`: PSS, group and swap of every process at every `dumpsys` poll (all processes, not only the `-top` rows).
+- `ram_<serial>_<time>.csv.gz`: one line per sample (Used, layers, zram, swap, Android Used), in kB.
+- `ram_<serial>_<time>_procs.csv.gz`: PSS, group and swap of every process at every `dumpsys` poll (all processes, not only the `-top` rows).
 
-Data is written continuously while the tool runs, so nothing is lost if the tool is closed unexpectedly. The **Export CSV** button downloads the first file.
+Data is written continuously: the process file is flushed at every poll and the sample file every 10 samples, so a
+hard kill loses at most 10 s (`Ctrl+C` or a service stop flushes everything). The files stay readable while written.
+A session that recorded nothing leaves no files. The **Export CSV** button downloads the first file, uncompressed.
+
+In memory (and in the dashboard) a session keeps 7,200 samples and 1,440 process polls; beyond that the older half
+is thinned 2:1, keeping the higher of each pair of samples so peaks survive. Long sessions stay fast to load;
+the CSV files always keep every sample.
 While **Paused**, no new samples are recorded.
 The **Restart** button clears the displayed data (chart, elapsed time, Δ column) and starts a new session on the same device,
 writing a new pair of CSV files; the files of the previous session are kept.
