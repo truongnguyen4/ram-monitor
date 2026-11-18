@@ -154,6 +154,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/state", s.handleState)
 	mux.HandleFunc("POST /api/pause", s.handlePause)
 	mux.HandleFunc("POST /api/restart", s.handleRestart)
+	mux.HandleFunc("POST /api/reboot", s.handleReboot)
 	mux.HandleFunc("GET /api/export.csv", s.handleExport)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	return mux
@@ -489,6 +490,54 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// handleReboot reboots the given devices (all monitored ones when the list is empty).
+// Only monitored devices can be rebooted; their collectors reconnect once they are back.
+func (s *Server) handleReboot(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Serials []string `json:"serials"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	s.mu.Lock()
+	var list []string
+	for serial := range s.live {
+		if len(req.Serials) == 0 || slices.Contains(req.Serials, serial) {
+			list = append(list, serial)
+		}
+	}
+	s.mu.Unlock()
+	if len(list) == 0 {
+		httpError(w, http.StatusConflict, errors.New("no monitored device to reboot"))
+		return
+	}
+	slices.Sort(list)
+	errs := make([]error, len(list))
+	var wg sync.WaitGroup
+	for i, serial := range list {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+			defer cancel()
+			if err := s.cfg.ADB.Reboot(ctx, serial); err != nil {
+				errs[i] = fmt.Errorf("%s: %w", serial, err)
+				return
+			}
+			log.Printf("[%s] reboot requested", serial)
+		}()
+	}
+	wg.Wait()
+	failed := []string{}
+	for _, err := range errs {
+		if err != nil {
+			failed = append(failed, err.Error())
+		}
+	}
+	writeJSON(w, map[string]any{"rebooted": len(list) - len(failed), "failed": failed})
 }
 
 func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {

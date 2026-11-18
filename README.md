@@ -47,17 +47,27 @@ Running the tool again while an instance is up does not open another port: it as
 | `-interval` | `1s` | `/proc/meminfo` polling interval |
 | `-proc-interval` | `10s` | `dumpsys meminfo` polling interval (process table) |
 | `-top` | `0` | Limit the process table to the N largest rows after filtering (`0` = show all processes) |
-| `-threshold` | `80` | Warning threshold (% of MemTotal) |
+| `-threshold` | `80` | Warning threshold (% of the effective total) |
 | `-out` | `ram-monitor-data` | Output directory for CSV files |
 | `-adb` | | adb path |
 | `-no-browser` | `false` | Do not open the browser automatically |
 
 ## Metrics
 
-**RAM in use** can be calculated in two ways, selected with the toggle in the dashboard:
+**RAM in use** shows three numbers at once:
 
-- **Kernel** (default): `MemTotal − MemAvailable` from `/proc/meminfo`, updated every second.
-- **Android (dumpsys)**: the `Used RAM` line of `dumpsys meminfo` (used PSS + kernel), updated every 10 seconds.
+- **Used · Kernel** (largest number, the one to watch): `Effective total − MemAvailable` from `/proc/meminfo`, updated
+  every second. It counts everything that cannot be freed quickly (DMA-BUF, GPU, zram pool included), so it is the real
+  memory pressure that drives lmkd.
+- **Effective total**: the RAM that is really usable. It equals `MemTotal`, minus memory blocks that are offlined but
+  still counted in `MemTotal` (the Qualcomm mem-offline driver keeps them there; detected as `MemTotal` − the sum of
+  `managed` pages in `/proc/zoneinfo`), minus the ramfs balloon of `limit_ram.sh` (read from
+  `/data/local/tmp/ram_limit.state`). Without a RAM limit it is simply `MemTotal`. A "Limited to N GB" badge appears
+  while `limit_ram.sh` is active.
+- **Used · Android (dumpsys)**: the `Used RAM` line of `dumpsys meminfo` (used PSS + kernel), updated every 10 seconds.
+  Lower than Used · Kernel (cached apps and "Lost RAM" are not counted); use it with the process table to see who uses RAM.
+
+Percentages, the threshold, the chart's dotted line and the device tiles all use the effective total.
 
 **The whole-session chart** splits the RAM in use into stacked layers:
 
@@ -72,6 +82,8 @@ Running the tool again while an instance is up does not open another port: it as
 **The process table** takes PSS and the OOM group from `dumpsys meminfo`. The Swap column reads `VmSwap` in `/proc/<pid>/status`.
 The Δ column is the PSS change since the process was first seen in the session.
 The table can be filtered by group (the list shows each group's total PSS and process count) and by process name.
+The name filter is a case-insensitive substring; separate several with `|` to match any of them
+(e.g. `google|vending` keeps every process whose name contains `google` or `vending`).
 The table lists all processes, sorted by PSS (it scrolls inside the card; the header and the Total row stay visible).
 Filters apply to all processes; with `-top N` the table shows only the N largest matching rows.
 The first row of the table is the **Total** of PSS, Swap and Δ over every process that matches the filters
@@ -88,7 +100,7 @@ at the latest `dumpsys` poll. Bars are scaled to the largest component and updat
 - Up to 8 components. Each row shows the current total and its change since the start of the session
   (the server keeps the PSS of every process at every poll, so the change is right also after a reload).
 - Hover a component's name to see how many processes match; click it to apply its filter to the table; click × to remove it.
-- Name filters are case-insensitive substrings, as in the table. A process that changes group (e.g. Cached → Foreground)
+- Name filters are case-insensitive substrings (`a|b` = a or b), as in the table. A process that changes group (e.g. Cached → Foreground)
   counts in the component of the group it is in at each poll.
 - Components are saved in the browser (localStorage), so they stay after a reload or a restart of the tool.
 
@@ -137,6 +149,9 @@ the CSV files always keep every sample.
 While **Paused**, no new samples are recorded.
 The **Restart** button clears the displayed data (chart, elapsed time, Δ column) and starts a new session on the same device,
 writing a new pair of CSV files; the files of the previous session are kept.
+The **Reboot all** button (after a confirmation listing the devices) runs `adb reboot` on every device ticked in
+**Devices** that is currently attached. Their sessions keep running: the chart shows a gap while a device reboots and
+recording resumes by itself once it is back.
 
 ## Build
 
@@ -144,6 +159,8 @@ writing a new pair of CSV files; the files of the previous session are kept.
 ./build.sh        # creates dist/ram-monitor-linux-amd64 and dist/ram-monitor-windows-amd64.exe
 go test ./...     # runs the parser unit tests
 ```
+
+`build.sh` needs Go 1.22 or newer on the host. It uses `$GO` if set, else `go` from `PATH`, else `~/.local/go/bin/go`.
 
 On Windows you can build directly: `go build -o ram-monitor.exe .`
 

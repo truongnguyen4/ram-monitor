@@ -154,7 +154,7 @@ func New(outDir string, info Info) (*Session, error) {
 		info:     info,
 		firstPSS: map[string]int64{},
 		histIdx:  map[[2]string]int32{},
-		sys:      newCSV(sysF, "time,elapsed_s,used_kb,mem_total_kb,mem_available_kb,anon_kb,shmem_kb,kernel_kb,zram_kb,other_kb,zram_stored_kb,swap_used_kb,android_used_kb"),
+		sys:      newCSV(sysF, "time,elapsed_s,used_kb,mem_total_kb,mem_available_kb,anon_kb,shmem_kb,kernel_kb,zram_kb,other_kb,zram_stored_kb,swap_used_kb,android_used_kb,effective_total_kb,offline_kb,balloon_kb,limit_kb"),
 		proc:     newCSV(procF, "time,elapsed_s,process,pid,group,pss_kb,swap_kb"),
 		procPath: procPath,
 		status:   collector.Status{Message: "connecting…"},
@@ -216,9 +216,10 @@ func (s *Session) AddSample(x collector.Sample) bool {
 	}
 	s.totalSamples++
 	t := time.UnixMilli(x.T)
-	fmt.Fprintf(s.sys.w, "%s,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+	fmt.Fprintf(s.sys.w, "%s,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
 		t.Format("2006-01-02T15:04:05.000"), float64(x.T-s.info.StartedAt)/1000,
-		x.Used, x.MemTotal, x.MemAvailable, x.Anon, x.Shmem, x.Kernel, x.Zram, x.Other, x.ZramOrig, x.SwapUsed, s.lastAndroid)
+		x.Used, x.MemTotal, x.MemAvailable, x.Anon, x.Shmem, x.Kernel, x.Zram, x.Other, x.ZramOrig, x.SwapUsed, s.lastAndroid,
+		x.EffTotal, x.Offline, x.Balloon, x.Limit)
 	if s.pendingSys++; s.pendingSys >= sysFlushEvery {
 		s.sys.flush()
 		s.pendingSys = 0

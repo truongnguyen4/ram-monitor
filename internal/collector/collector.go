@@ -18,6 +18,9 @@ type Status struct {
 	Message   string `json:"message"`
 }
 
+// LimitStateFile is written by limit_ram.sh while a RAM limit is active.
+const LimitStateFile = "/data/local/tmp/ram_limit.state"
+
 // Collector streams /proc/meminfo every Interval and polls dumpsys meminfo every ProcInterval.
 type Collector struct {
 	ADB          *adb.Client
@@ -38,8 +41,13 @@ func (c *Collector) Run(ctx context.Context) {
 
 func (c *Collector) streamScript() string {
 	secs := strconv.FormatFloat(c.Interval.Seconds(), 'f', -1, 64)
-	return "while true; do echo @@B; cat /proc/meminfo; " +
-		"echo \"@@Z $(cat /sys/block/zram0/mm_stat 2>/dev/null)\"; echo @@E; sleep " + secs + "; done"
+	// @@M: usable RAM seen by the zones (kB); @@L: state of limit_ram.sh (RAM limit simulation).
+	return `P=$(getconf PAGESIZE 2>/dev/null); [ -n "$P" ] || P=4096; ` +
+		`while true; do echo @@B; cat /proc/meminfo; ` +
+		`echo "@@Z $(cat /sys/block/zram0/mm_stat 2>/dev/null)"; ` +
+		`echo "@@M $(awk -v p=$P '$1 == "managed" { s += $2 } END { print int(s * p / 1024) }' /proc/zoneinfo 2>/dev/null)"; ` +
+		`echo "@@L $(cat ` + LimitStateFile + ` 2>/dev/null | tr "\\n" " ")"; ` +
+		`echo @@E; sleep ` + secs + `; done`
 }
 
 func (c *Collector) streamLoop(ctx context.Context) {
@@ -72,16 +80,21 @@ func (c *Collector) streamOnce(ctx context.Context) error {
 
 	sc := bufio.NewScanner(out)
 	var lines []string
-	var mm string
+	var mm, lim string
+	var managed int64
 	in := false
 	connected := false
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), "\r")
 		switch {
 		case line == "@@B":
-			in, lines, mm = true, lines[:0], ""
+			in, lines, mm, lim, managed = true, lines[:0], "", "", 0
 		case strings.HasPrefix(line, "@@Z"):
 			mm = strings.TrimSpace(strings.TrimPrefix(line, "@@Z"))
+		case strings.HasPrefix(line, "@@M"):
+			managed, _ = strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "@@M")), 10, 64)
+		case strings.HasPrefix(line, "@@L"):
+			lim = strings.TrimSpace(strings.TrimPrefix(line, "@@L"))
 		case line == "@@E":
 			if !in {
 				continue
@@ -95,7 +108,7 @@ func (c *Collector) streamOnce(ctx context.Context) error {
 				connected = true
 				c.OnStatus(Status{Connected: true, Message: "recording"})
 			}
-			c.OnSample(buildSample(time.Now().UnixMilli(), mi, mm))
+			c.OnSample(buildSample(time.Now().UnixMilli(), mi, mm, managed, lim))
 		case in:
 			lines = append(lines, line)
 		}

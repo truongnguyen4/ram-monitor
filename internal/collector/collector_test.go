@@ -22,7 +22,7 @@ Percpu:            10048 kB`
 
 func TestBuildSample(t *testing.T) {
 	mi := parseMeminfo(strings.Split(meminfoFixture, "\n"))
-	s := buildSample(1000, mi, "904044544 238317487 250654720        0 375123968    20951    39499     5299")
+	s := buildSample(1000, mi, "904044544 238317487 250654720        0 375123968    20951    39499     5299", 0, "")
 
 	if s.Used != 5630420-3548172 {
 		t.Errorf("Used = %d", s.Used)
@@ -43,7 +43,7 @@ func TestBuildSample(t *testing.T) {
 
 func TestBuildSampleNoZram(t *testing.T) {
 	mi := parseMeminfo(strings.Split(meminfoFixture, "\n"))
-	s := buildSample(0, mi, "")
+	s := buildSample(0, mi, "", 0, "")
 	if s.Zram != 0 || s.Other < 0 {
 		t.Errorf("unexpected zram=%d other=%d", s.Zram, s.Other)
 	}
@@ -113,5 +113,26 @@ func TestParseVmSwap(t *testing.T) {
 	m := parseVmSwap(out)
 	if m[2309] != 6084 || m[1630] != 0 || len(m) != 2 {
 		t.Errorf("parseVmSwap = %v", m)
+	}
+}
+
+func TestBuildSampleLimited(t *testing.T) {
+	mi := parseMeminfo(strings.Split(meminfoFixture, "\n"))
+	// 1 GB offlined (still in MemTotal) + 512 MB balloon
+	managed := int64(5630420 - 1024*1024)
+	s := buildSample(0, mi, "", managed, "target=4096M hidden=1024 balloon=512")
+	if want := int64(5630420 - 1024*1024 - 512*1024); s.EffTotal != want {
+		t.Errorf("EffTotal = %d, want %d", s.EffTotal, want)
+	}
+	if s.Offline != 1024*1024 || s.Balloon != 512*1024 || s.Limit != 4096*1024 {
+		t.Errorf("Offline/Balloon/Limit = %d/%d/%d", s.Offline, s.Balloon, s.Limit)
+	}
+	if s.Used != s.EffTotal-s.MemAvailable {
+		t.Errorf("Used = %d, want EffTotal-MemAvailable", s.Used)
+	}
+	// no limit: zones match MemTotal, no state file
+	s = buildSample(0, mi, "", 5630420, "")
+	if s.EffTotal != s.MemTotal || s.Offline != 0 || s.Balloon != 0 {
+		t.Errorf("unlimited: EffTotal=%d Offline=%d Balloon=%d", s.EffTotal, s.Offline, s.Balloon)
 	}
 }

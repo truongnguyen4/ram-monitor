@@ -35,6 +35,10 @@
     </div>
   </div>
   <div class="topbar-right">
+    <button type="button" class="btn btn-danger" id="reboot-btn" title="Reboot every device ticked in Devices (monitoring resumes when they are back)" disabled>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v8"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>
+      <span id="reboot-label">Reboot all</span>
+    </button>
     <button type="button" class="btn" id="pause-btn" disabled>
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path id="pause-icon" d="M9 5v14M15 5v14"/></svg>
       <span id="pause-label">Pause</span>
@@ -73,22 +77,35 @@
 
   <div class="side">
     <div class="card hero">
-      <span class="eyebrow">RAM in use</span>
-      <div class="hero-num">
-        <div class="hero-main"><span class="mono big" id="used">–</span><span class="mono unit">GB</span></div>
-        <div class="hero-sub"><span class="mono muted" id="total">/ – GB</span><span class="pill mono" id="pct">–</span></div>
+      <div class="hero-head">
+        <span class="eyebrow">RAM in use</span>
+        <span class="pill limit mono" id="limit-pill" hidden></span>
       </div>
-      <div class="bar" aria-hidden="true">
-        <div class="bar-fill" id="bar-fill"></div>
-        <div class="bar-tick" id="bar-tick"></div>
+      <div class="hero-total">
+        <div class="hero-main">
+          <span class="mono big" id="used-kernel">–</span><span class="mono unit">GB</span>
+          <span class="pill mono" id="pct-kernel">–</span>
+        </div>
+        <div class="bar" aria-hidden="true"><div class="bar-fill" id="bar-kernel"></div><div class="bar-tick"></div></div>
+        <span class="stat-label">Used · Kernel</span>
+        <span class="cap" id="cap-kernel">Effective total − MemAvailable</span>
+      </div>
+      <div class="hero-stats">
+        <div class="stat">
+          <div class="stat-num"><span class="mono mid" id="eff-total">–</span><span class="mono unit-s">GB</span></div>
+          <span class="stat-label">Effective total</span>
+          <span class="cap" id="eff-cap">Usable RAM = MemTotal</span>
+        </div>
+        <div class="stat">
+          <div class="stat-num"><span class="mono mid" id="used-android">–</span><span class="mono unit-s">GB</span><span class="pill mono" id="pct-android">–</span></div>
+          <div class="bar" aria-hidden="true"><div class="bar-fill" id="bar-android"></div><div class="bar-tick"></div></div>
+          <span class="stat-label">Used · Android (dumpsys)</span>
+          <span class="cap" id="cap-android">"Used RAM" = used PSS + kernel</span>
+        </div>
       </div>
       <div class="hero-foot">
-        <span id="formula">Used = MemTotal − MemAvailable</span>
+        <span>% of effective total</span>
         <span>Threshold <b class="amber" id="th-label">80%</b></span>
-      </div>
-      <div class="seg" role="group" aria-label="How Used is calculated">
-        <button type="button" aria-pressed="true" data-mode="kernel">Kernel</button>
-        <button type="button" aria-pressed="false" data-mode="android">Android (dumpsys)</button>
       </div>
     </div>
     <div class="card zram">
@@ -109,7 +126,7 @@
       <label for="proc-filter" class="sr-only">Filter processes</label>
       <label for="proc-group" class="sr-only">Filter by group</label>
       <select id="proc-group"><option value="">All groups</option></select>
-      <input id="proc-filter" type="search" placeholder="Filter by process name" autocomplete="off">
+      <input id="proc-filter" type="search" placeholder="Filter by process name (a|b = a or b)" autocomplete="off">
       <span class="muted small" id="proc-meta">waiting for dumpsys meminfo…</span>
     </div>
   </div>

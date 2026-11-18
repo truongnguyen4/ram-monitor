@@ -53,7 +53,9 @@ h2 { margin: 0; font-size: 17px; font-weight: 600; }
 .btn:disabled, .btn[aria-disabled="true"] { opacity: 0.5; pointer-events: none; }
 .btn-primary { background: var(--blue); border-color: var(--blue); color: var(--bg); font-weight: 600; }
 .btn-primary:hover { background: var(--blue-soft); border-color: var(--blue-soft); }
-.btn:focus-visible, .seg button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--blue-soft); outline-offset: 2px; }
+.btn-danger { color: var(--red); }
+.btn-danger:hover { border-color: var(--red); }
+.btn:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--blue-soft); outline-offset: 2px; }
 
 /* Cards */
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
@@ -81,11 +83,9 @@ h2 { margin: 0; font-size: 17px; font-weight: 600; }
 /* Hero */
 .hero { flex: 1; padding: 24px; justify-content: center; gap: 18px; }
 .eyebrow { font-size: 14px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
-.hero-num { display: flex; flex-direction: column; gap: 8px; }
 .hero-main { display: flex; align-items: baseline; gap: 10px; }
 .big { font-size: 72px; font-weight: 600; line-height: 1; letter-spacing: -0.02em; }
 .unit { font-size: 22px; color: var(--muted); }
-.hero-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 16px; }
 .pill { font-size: 15px; font-weight: 600; padding: 4px 10px; border-radius: 999px; background: #1E2A3D; color: #A9CBFF; }
 .pill.warn { background: #3A2A10; color: var(--amber); }
 .bar { position: relative; height: 14px; background: var(--bg); border: 1px solid var(--border); border-radius: 999px; }
@@ -93,11 +93,23 @@ h2 { margin: 0; font-size: 17px; font-weight: 600; }
 .bar-fill.warn { background: var(--amber); }
 .bar-tick { position: absolute; top: -5px; bottom: -5px; width: 2px; background: var(--amber); left: 80%; }
 .hero-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; font-size: 13px; color: var(--muted); }
-.seg { display: flex; align-self: flex-start; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 3px; gap: 2px; }
-.seg button { min-height: 32px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
-.seg button[aria-pressed="true"] { background: var(--border); color: var(--text); }
 
 /* zram */
+.hero-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.pill.limit { font-size: 12px; background: #3A2A10; color: var(--amber); }
+.hero-total { display: flex; flex-direction: column; gap: 6px; }
+.hero-main .pill { margin-left: auto; align-self: center; }
+.hero-total .bar { margin: 6px 0 2px; }
+.hero-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 16px; padding-top: 16px; border-top: 1px solid var(--border-soft); }
+.stat { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.stat-num { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
+.mid { font-size: 30px; font-weight: 600; line-height: 1; }
+.unit-s { font-size: 14px; color: var(--muted); }
+.stat-num .pill { font-size: 12px; padding: 2px 8px; margin-left: auto; }
+.stat .bar { height: 8px; }
+.stat .bar-tick { top: -4px; bottom: -4px; }
+.stat-label { font-size: 13px; font-weight: 600; color: var(--text); }
+.cap { font-size: 12px; line-height: 1.4; color: var(--muted); }
 .zram { flex-direction: row; flex-wrap: wrap; justify-content: space-between; align-items: center; padding: 20px 24px; gap: 8px 16px; }
 .zram > div { display: flex; flex-direction: column; gap: 4px; }
 .zram-num { font-size: 28px; font-weight: 600; }
@@ -180,3 +192,4 @@ details.device-picker > summary svg { color: var(--muted); }
 .picker-list .ser { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-left: auto; }
 .dev.offline { opacity: 0.6; }
 .picker-list label.all-row { border-bottom: 1px solid var(--border); border-radius: 6px 6px 0 0; margin-bottom: 4px; }
+@media (prefers-reduced-motion: reduce) { .bar-fill, .comp-bar span { transition: none; } }

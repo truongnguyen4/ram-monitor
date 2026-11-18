@@ -110,6 +110,12 @@ func (c *Client) Shell(ctx context.Context, serial, script string) ([]byte, erro
 	return c.run(ctx, "-s", serial, "shell", script)
 }
 
+// Reboot restarts the device.
+func (c *Client) Reboot(ctx context.Context, serial string) error {
+	_, err := c.run(ctx, "-s", serial, "reboot")
+	return err
+}
+
 // Stream starts a long-running shell command and returns its stdout.
 // The command stops when ctx is cancelled; call Wait on the returned cmd.
 func (c *Client) Stream(ctx context.Context, serial, script string) (io.ReadCloser, *exec.Cmd, error) {

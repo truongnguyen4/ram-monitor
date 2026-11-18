@@ -13,6 +13,8 @@ const KB_PER_GB = 1024 * 1024;
 const $ = (id) => document.getElementById(id);
 const gb = (kb) => (kb / KB_PER_GB).toFixed(2);
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 'es'}`;
+// usable RAM of a sample (effTotal is missing in data from older builds)
+const effOf = (s) => s.effTotal || s.memTotal;
 const mb = (kb) => Math.round(kb / 1024).toLocaleString('en-US');
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -27,7 +29,6 @@ let samples = [];
 let procs = null;
 let paused = false;
 let status = { connected: false, message: 'Not connected' };
-let mode = 'kernel';
 let filter = '';
 let groupFilter = '';
 let plot = null;
@@ -40,7 +41,7 @@ const q = () => `serial=${encodeURIComponent(selected)}`;
 // ---------- chart ----------
 
 function emptyCols() {
-  // [x, stack top→bottom (5), used, memTotal, threshold]
+  // [x, stack top→bottom (5), used, effective total, threshold]
   return [[], [], [], [], [], [], [], [], []];
 }
 
@@ -52,13 +53,15 @@ function pushCols(s) {
   // series 1..5 are drawn top layer first so lower layers paint over it
   for (let i = 0; i < LAYERS.length; i++) cols[1 + i].push(stack[LAYERS.length - 1 - i] / KB_PER_GB);
   cols[6].push(s.used / KB_PER_GB);
-  cols[7].push(s.memTotal / KB_PER_GB);
-  cols[8].push((s.memTotal * cfg.threshold) / 100 / KB_PER_GB);
+  cols[7].push(effOf(s) / KB_PER_GB);
+  cols[8].push((effOf(s) * cfg.threshold) / 100 / KB_PER_GB);
 }
 
 function yMax() {
-  const last = samples[samples.length - 1];
-  return last ? Math.ceil(last.memTotal / KB_PER_GB) : 8;
+  // the highest effective total of the session, so a limit set mid-session does not clip older data
+  let max = 0;
+  if (cols) for (const v of cols[7]) if (v > max) max = v;
+  return max ? Math.ceil(max) : 8;
 }
 
 function buildPlot() {
@@ -86,7 +89,7 @@ function buildPlot() {
       {},
       ...top.map((l) => ({ label: l.label, stroke: l.color, fill: l.color, width: 1, points: { show: false } })),
       { label: 'Used', stroke: '#E6EDF3', width: 2, points: { show: false } },
-      { label: 'MemTotal', stroke: '#E6EDF3', width: 1, dash: [2, 4], points: { show: false } },
+      { label: 'Effective total', stroke: '#E6EDF3', width: 1, dash: [2, 4], points: { show: false } },
       { label: 'Threshold', stroke: '#F5A524', width: 1.5, dash: [6, 4], points: { show: false } },
     ],
     hooks: { setCursor: [updateTooltip] },
@@ -99,7 +102,8 @@ function updateTooltip(u) {
   const idx = u.cursor.idx;
   if (idx == null || !samples[idx]) { tip.hidden = true; return; }
   const s = samples[idx];
-  let html = `<div class="tt-total"><span>Total Used</span><span class="mono">${gb(s.used)} GB</span></div>`;
+  let html = `<div class="tt-row"><span>Effective total</span><span class="mono">${gb(effOf(s))} GB</span></div>`;
+  html += `<div class="tt-total"><span>Total Used</span><span class="mono">${gb(s.used)} GB</span></div>`;
   for (const l of LAYERS.slice().reverse()) {
     html += `<div class="tt-row"><span><i style="background:${l.color}"></i>${esc(l.label)}</span><span class="mono">${gb(s[l.k])} GB</span></div>`;
   }
@@ -123,29 +127,43 @@ function renderLegend() {
 
 function renderHero() {
   const last = samples[samples.length - 1];
-  const total = last ? last.memTotal : 0;
-  let used = null;
-  if (mode === 'kernel') {
-    used = last ? last.used : null;
-    $('formula').textContent = `Used = MemTotal − MemAvailable · every ${cfg.intervalMs / 1000} s`;
-  } else {
-    used = procs && procs.androidUsed ? procs.androidUsed : null;
-    $('formula').textContent = `dumpsys meminfo "Used RAM" · every ${cfg.procIntervalMs / 1000} s`;
+  const total = last ? effOf(last) : 0;
+
+  $('eff-total').textContent = total ? gb(total) : '–';
+  const pill = $('limit-pill');
+  pill.hidden = !(last && last.limit);
+  if (last && last.limit) pill.textContent = `Limited to ${+(last.limit / KB_PER_GB).toFixed(1)} GB`;
+  let cap = 'Usable RAM = MemTotal';
+  if (last && (last.offline || last.balloon)) {
+    const parts = [`MemTotal ${gb(last.memTotal)}`];
+    if (last.offline) parts.push(`offline ${gb(last.offline)}`);
+    if (last.balloon) parts.push(`balloon ${gb(last.balloon)}`);
+    cap = `Usable RAM = ${parts.join(' − ')} GB`;
   }
-  $('total').textContent = total ? `/ ${gb(total)} GB` : '/ – GB';
+  $('eff-cap').textContent = cap;
+
+  $('cap-kernel').textContent = `Effective total − MemAvailable · every ${cfg.intervalMs / 1000} s`;
+  $('cap-android').textContent = `dumpsys "Used RAM" = used PSS + kernel · every ${cfg.procIntervalMs / 1000} s`;
+  setStat('kernel', last ? last.used : null, total);
+  setStat('android', procs && procs.androidUsed ? procs.androidUsed : null, total);
+}
+
+function setStat(k, used, total) {
+  const fill = $(`bar-${k}`);
+  const pctEl = $(`pct-${k}`);
   if (used == null || !total) {
-    $('used').textContent = '–';
-    $('pct').textContent = '–';
-    $('bar-fill').style.width = '0';
+    $(`used-${k}`).textContent = '–';
+    pctEl.textContent = '–';
+    fill.style.width = '0';
     return;
   }
   const pct = (used / total) * 100;
   const warn = pct >= cfg.threshold;
-  $('used').textContent = gb(used);
-  $('pct').textContent = `${pct.toFixed(1)}%`;
-  $('pct').classList.toggle('warn', warn);
-  $('bar-fill').style.width = `${Math.min(100, pct)}%`;
-  $('bar-fill').classList.toggle('warn', warn);
+  $(`used-${k}`).textContent = gb(used);
+  pctEl.textContent = `${pct.toFixed(1)}%`;
+  pctEl.classList.toggle('warn', warn);
+  fill.style.width = `${Math.min(100, pct)}%`;
+  fill.classList.toggle('warn', warn);
 }
 
 function renderZram() {
@@ -181,15 +199,26 @@ function renderGroupOptions() {
   sel.value = groupFilter;
 }
 
+// Name filter: case-insensitive substrings separated by "|" (any of them matches), e.g. "google|vending".
+function nameTerms(f) {
+  return f.toLowerCase().split('|').map((t) => t.trim()).filter(Boolean);
+}
+
+function nameMatches(name, terms) {
+  if (!terms.length) return true;
+  const n = name.toLowerCase();
+  return terms.some((t) => n.includes(t));
+}
+
 function renderProcs() {
   const body = $('proc-body');
   const totalBody = $('proc-total');
   renderGroupOptions();
   updateCompAddBtn();
   if (!procs) { body.innerHTML = ''; totalBody.innerHTML = ''; return; }
-  const f = filter.trim().toLowerCase();
+  const terms = nameTerms(filter);
   const matched = procs.rows.filter((p) =>
-    (!groupFilter || (p.group || '') === groupFilter) && (!f || p.name.toLowerCase().includes(f)));
+    (!groupFilter || (p.group || '') === groupFilter) && nameMatches(p.name, terms));
   const rows = cfg.topN > 0 ? matched.slice(0, cfg.topN) : matched;
   const deltaCell = (kb) => {
     const d = Math.round(kb / 1024); // MB, sign follows the rounded value
@@ -201,7 +230,7 @@ function renderProcs() {
   // Totals cover every process matching the filters, not only the rows shown.
   const sum = matched.reduce((a, p) => ({ pss: a.pss + p.pss, swap: a.swap + p.swap, delta: a.delta + p.delta }),
     { pss: 0, swap: 0, delta: 0 });
-  const scope = groupFilter || f ? 'filtered' : 'all';
+  const scope = groupFilter || terms.length ? 'filtered' : 'all';
   totalBody.innerHTML = `<tr>
       <td class="name" title="Sum over all ${matched.length} matching processes">Total (${scope}, ${plural(matched.length, 'process')})</td>
       <td><span class="group">${esc(groupFilter || 'All groups')}</span></td>
@@ -258,7 +287,7 @@ function renderAll() {
   document.title = info ? `RAM · ${info.model || 'Device'} · ${info.serial}` : 'RAM Monitor';
   $('main').hidden = !info;
   $('th-label').textContent = `${cfg.threshold}%`;
-  $('bar-tick').style.left = `${cfg.threshold}%`;
+  document.querySelectorAll('.bar-tick').forEach((t) => { t.style.left = `${cfg.threshold}%`; });
   $('csv-path').textContent = info ? `Saving to: ${info.csvPath}` : '';
   renderStatus();
   renderElapsed();
@@ -349,9 +378,10 @@ function appendHistory(snap) {
 function compMatch(c) {
   // per history key: does it belong to the component? (extended as new keys appear)
   const m = c.m || (c.m = []);
+  const terms = nameTerms(c.name);
   for (let i = m.length; i < hist.keys.length; i++) {
     const [name, group] = hist.keys[i];
-    m.push((!c.group || group === c.group) && (!c.name || name.toLowerCase().includes(c.name)));
+    m.push((!c.group || group === c.group) && nameMatches(name, terms));
   }
   return m;
 }
@@ -445,7 +475,7 @@ function newTile(serial) {
 
 function updateTile(el, serial, ov, i) {
   const last = ov.last;
-  const total = last ? last.memTotal : 0;
+  const total = last ? effOf(last) : 0;
   const pct = total ? (last.used / total) * 100 : null;
   const warn = pct != null && pct >= cfg.threshold;
   const conn = ov.status && ov.status.connected;
@@ -465,7 +495,7 @@ function updateTile(el, serial, ov, i) {
     [inf.serial, inf.android && `Android ${inf.android}`, inf.physicalGB && `${inf.physicalGB} GB`].filter(Boolean).join(' · ');
   el.querySelector('.v').textContent = last ? `${gb(last.used)} GB` : '–';
   const p = el.querySelector('.p');
-  p.textContent = pct == null ? state : `${pct.toFixed(1)}% of ${gb(total)}`;
+  p.textContent = pct == null ? state : `${pct.toFixed(1)}% of ${gb(total)}${last.limit ? ' (limited)' : ''}`;
   p.classList.toggle('warn', warn);
   let svg = '';
   if (total && ov.recent.length > 1) {
@@ -518,6 +548,39 @@ async function loadSessions() {
   if ($('picker').open) renderPicker();
   if (!overview.has(selected)) selected = overview.size ? overview.keys().next().value : '';
   renderDevices();
+  renderRebootBtn();
+}
+
+// ---------- reboot ----------
+// Reboots every ticked (monitored) device that is attached; remembered-but-absent ones are skipped.
+
+let rebooting = false;
+const rebootable = () => [...overview].filter(([, ov]) => !ov.offline).map(([serial]) => serial);
+
+function renderRebootBtn() {
+  const n = rebootable().length;
+  $('reboot-label').textContent = rebooting ? 'Rebooting…' : n ? `Reboot all (${n})` : 'Reboot all';
+  $('reboot-btn').disabled = rebooting || !n;
+}
+
+async function rebootAll() {
+  const serials = rebootable();
+  if (!serials.length) return;
+  const names = serials.map((s) => `  • ${(overview.get(s).info || {}).model || 'Device'} (${s})`).join('\n');
+  if (!confirm(`Reboot ${serials.length} device${serials.length === 1 ? '' : 's'}?\n${names}\n\nMonitoring resumes automatically when they are back.`)) return;
+  rebooting = true;
+  renderRebootBtn();
+  try {
+    const r = await fetch('api/reboot', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ serials }) });
+    const res = await r.json().catch(() => ({}));
+    if (!r.ok) alert(`Cannot reboot: ${res.error || r.status}`);
+    else if (res.failed && res.failed.length) alert(`Reboot failed on ${res.failed.length} device(s):\n${res.failed.join('\n')}`);
+  } catch (e) {
+    alert(`Cannot reboot: ${e.message}`);
+  } finally {
+    rebooting = false;
+    renderRebootBtn();
+  }
 }
 
 async function select(serial) {
@@ -723,6 +786,8 @@ $('pause-btn').addEventListener('click', async () => {
   }
 });
 
+$('reboot-btn').addEventListener('click', rebootAll);
+
 $('restart-btn').addEventListener('click', async () => {
   if (!info) return;
   if (!confirm('Clear the displayed data and restart monitoring from scratch?\nThe CSV files of the current session are kept.')) return;
@@ -740,14 +805,6 @@ $('restart-btn').addEventListener('click', async () => {
   } finally {
     btn.disabled = !info;
   }
-});
-
-document.querySelectorAll('.seg button').forEach((b) => {
-  b.addEventListener('click', () => {
-    mode = b.dataset.mode;
-    document.querySelectorAll('.seg button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
-    renderHero();
-  });
 });
 
 $('proc-filter').addEventListener('input', (e) => { filter = e.target.value; renderProcs(); });
